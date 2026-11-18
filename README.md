@@ -129,13 +129,10 @@ $project = 'C:\src\FDS\Fuser\Fuser.uproject'
 
 ### 7. Cook and package
 
-The cooker skips maps in `DirectoriesToAlwaysCook`, so every map FDS serves is passed explicitly. The lists are `Config\FDSVenueMaps.txt` (one empty world per venue) and `Config\FDSVenueSublevels-*.txt` (the streamed sublevel stubs).
+The cooker skips maps in `DirectoriesToAlwaysCook`, so every map FDS serves is named explicitly. The `FDSEditor` module adds the maps listed in `Config\FDSVenueMaps.txt` (one empty world per venue) and `Config\FDSVenueSublevels-*.txt` (the streamed sublevel stubs) to every cook. They can't go on `-map=`: about 4,000 characters of map names crash the editor at startup.
 
 ```powershell
-$fuser = Split-Path $project
-$maps  = @('/Game/Maps/Venue01/Venue01', '/Game/Maps/Server/ServerDefaultMap')
-Get-ChildItem "$fuser\Config" -Filter 'FDSVenue*.txt' | ForEach-Object { $maps += Get-Content $_.FullName | Where-Object { $_.Trim() } }
-$mapArg = '-map=' + (($maps | Select-Object -Unique) -join '+')
+$mapArg = '-map=/Game/Maps/Venue01/Venue01+/Game/Maps/Server/ServerDefaultMap'
 
 & "$engine\Engine\Build\BatchFiles\RunUAT.bat" BuildCookRun "-project=$project" -noP4 -utf8output `
     -server -noclient -serverplatform=Win64 -serverconfig=Development `
@@ -178,13 +175,48 @@ cd ../../docker
 docker build -t fds-server:latest .
 ```
 
-- **Version reporting (optional):** FDS reports the `version` field of a `MANIFEST.json` at the tarball's root (for example `{"version": "1.0.0"}`) to fuserd. Without the file it reports `dev`.
+- **Version reporting (optional):** FDS reports the `version` field of a `MANIFEST.json` at the tarball's root (for example `{"version": "1.0.0"}`) to fuserd. Without the file it reports `dev`. The archives from step 10 include one.
 - **Debug symbols:** excluding the `.debug` / `.sym` files keeps the image small.
 - **Running the image:** see [docker/README.md](docker/README.md) for the ports, environment variables and mounting a FUSER install.
 
+### 10. Distribution archives (optional)
+
+`tools\build-probe.ps1 -Mode Package` runs the package step for either platform (steps 7 and 8). With `-Dist` it then runs `tools\make-dist.py`, which writes versioned archives to `build\dist`.
+
+> [!IMPORTANT]
+> **Set your local paths before running `build-probe.ps1`.** The script ships without machine paths. Edit the *Local paths* block near the top of `tools\build-probe.ps1`, or pass the matching argument on every run:
+>
+> | Variable | Argument | Needed for | If empty |
+> |---|---|---|---|
+> | `$LocalEngineRoot` | `-EngineRoot` | every run | the script stops |
+> | `$LocalLinuxToolchain` | `-LinuxToolchain` | `-Platform Linux` | `LINUX_MULTIARCH_ROOT` (step 8) |
+> | `$LocalPython` | `-Python` | `-Dist` (Python 3) | `python.exe` on `PATH` |
+>
+> An argument takes precedence over the variable. Every path is checked before the engine tools start, so a wrong path fails at once rather than after the build.
+
+```powershell
+.\tools\build-probe.ps1 -Mode Package -Platform Win64 -Dist
+.\tools\build-probe.ps1 -Mode Package -Platform Linux -Dist
+
+# Or with the paths as arguments:
+.\tools\build-probe.ps1 -EngineRoot $engine -Python 'C:\Program Files\Python313\python.exe' -Mode Package -Platform Win64 -Dist
+```
+
+`-Mode Build` (the default) compiles the server without cooking or packaging.
+
+| Platform | Server archive | Symbols archive | Also writes |
+|---|---|---|---|
+| Win64 | `fds-server-windows-<version>.zip` | `fds-server-windows-<version>-symbols.zip` (`.pdb`) | nothing else |
+| Linux | `fds-server-linux-<version>.tar.gz` | `fds-server-linux-<version>-symbols.tar.gz` (`.debug`, `.sym`) | `build\docker`, a ready Docker build context (step 9), recreated on every run |
+
+- **Contents:** the staged server folder (`WindowsServer` or `LinuxServer`) without `Fuser/Saved` or debug symbols, plus a `MANIFEST.json` at the root: version, build time, engine, network version, platform and each file's SHA-256. A copy is written beside the archive as `<archive name>.MANIFEST.json`.
+- **Linux file modes:** the tarball is owned by `0:0`, with the binary and launcher script `0755` and everything else `0644`, so it needs no `chmod` after unpacking.
+- **Version:** the local time (`yyyyMMdd-HHmmss`) by default. `-DistVersion` sets it.
+- **Existing package:** to archive a package without rebuilding it, run `python tools\make-dist.py --platform Win64` (or `--platform Linux`). `--version` sets the version.
+
 ## Running
 
-Windows, from the package:
+Windows, from the package (or from the folder `fds-server-windows-<version>.zip` was extracted to):
 
 ```powershell
 build\package\WindowsServer\Fuser\Binaries\Win64\FuserServerServer.exe -port=7777 -log
@@ -199,7 +231,7 @@ build/package-linux/LinuxServer/FuserServerServer.sh -port=7777 -log
 - **Ports:** clients join UDP `7777`. The session-browser beacon answers on the game port + 100.
 - **Settings:** the server is configured through environment variables, listed in [docker/README.md](docker/README.md), and through `Fuser/Config/DefaultGame.ini`, section `[/Script/FuserServer.FDSLobby]` (set length, DJ slots, lobby timer, results behaviour). Any ini value can be overridden at launch, for example `-ini:Game:[/Script/FuserServer.FDSLobby]:ResultsXPPayout=False`.
 - **Venue:** `-FDSVenue=` / `FDS_VENUE` picks the venue. `-FDSMainStage` / `FDS_MAIN_STAGE=1` selects the Main Stage mode.
-- **FUSER install:** to mount one, set `FDS_FUSER_ROOT` to the folder holding `Fuser\Content\Paks`, and `FDS_PAK_KEY` to FUSER's AES pak key (64 hex digits or base64). The key is read from the environment only and never logged. Without an install, FDS runs on its own content. Only Venue01 then works, because FDS has stubs for Venue01's streamed sublevels only.
+- **FUSER install:** to mount one, set `FDS_FUSER_ROOT` to the folder holding `Fuser\Content\Paks`, and `FDS_PAK_KEY` to FUSER's AES pak key (64 hex digits or base64). The key is read from the environment only and never logged. Without an install, FDS runs on its own content, which has stub worlds and streamed sublevels for Venue01–06; venue IDs (`VenueA`–`VenueF`) resolve from `[/Script/FuserServer.FDSVenues]` in `DefaultGame.ini`.
 
 FUSER clients reach FDS through fuserd's matchmaking. A client set up to join an address directly can join it too.
 
@@ -233,8 +265,9 @@ The assets in `Fuser/Content` are checked in. To recreate them, run the editor c
 
 ```powershell
 $cmd = "$engine\Engine\Binaries\Win64\UE4Editor-Cmd.exe"
+$fuser = Split-Path $project
 & $cmd $project -run=FDSCreateMaps -mapsfile="$fuser\Config\FDSVenueMaps.txt"
-& $cmd $project -run=FDSCreateMaps -mapsfile="$fuser\Config\FDSVenueSublevels-Venue01.txt"
+Get-ChildItem "$fuser\Config\FDSVenueSublevels-*.txt" | ForEach-Object { & $cmd $project -run=FDSCreateMaps -mapsfile="$($_.FullName)" }
 & $cmd $project -run=FDSCreateMaps -maps=/Game/Maps/Server/ServerDefaultMap
 & $cmd $project -run=FDSCreateBlueprints
 ```

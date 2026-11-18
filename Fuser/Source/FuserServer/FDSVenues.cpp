@@ -4,6 +4,7 @@
 #include "GameMapsSettings.h"
 #include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
@@ -210,32 +211,72 @@ namespace
         return true;
     }
 
+    // FDS's own catalogue first ([/Script/FuserServer.FDSVenues] +Venue=<ID>,<map package>), so venue IDs resolve
+    // without the install. A mounted install's VenueData replaces the entry with the same ID (adding its lighting
+    // sublevels) and adds the venues FDS doesn't list.
     void ReadCatalog()
     {
         GCatalog.Reset();
-        if (!FDSInstallContent::IsMounted())
-        {
-            return;
-        }
-        const FString Dir = FPaths::ProjectContentDir() / TEXT("Gameplay/Venues");
-        TArray<FString> Files;
-        IFileManager::Get().FindFiles(Files, *(Dir / TEXT("*.uasset")), true, false);
-        Files.Sort();
-        for (const FString& File : Files)
+        TArray<FString> Entries;
+        GConfig->GetArray(TEXT("/Script/FuserServer.FDSVenues"), TEXT("Venue"), Entries, GGameIni);
+        for (const FString& Entry : Entries)
         {
             FDSVenues::FVenue Venue;
-            FString Why;
-            if (!ReadVenue(Dir / File, Venue, Why))
+            if (!Entry.Split(TEXT(","), &Venue.Id, &Venue.Map))
             {
-                UE_LOG(LogFDS, Warning, TEXT("FDS: venue data %s unreadable: %s"), *File, *Why);
+                UE_LOG(LogFDS, Warning, TEXT("FDS: venue entry '%s' ignored (expected <ID>,<map package>)"), *Entry);
                 continue;
             }
+            Venue.Id.TrimStartAndEndInline();
+            Venue.Map.TrimStartAndEndInline();
+            GCatalog.Add(MoveTemp(Venue));
+        }
+        if (FDSInstallContent::IsMounted())
+        {
+            const FString Dir = FPaths::ProjectContentDir() / TEXT("Gameplay/Venues");
+            TArray<FString> Files;
+            IFileManager::Get().FindFiles(Files, *(Dir / TEXT("*.uasset")), true, false);
+            Files.Sort();
+            for (const FString& File : Files)
+            {
+                FDSVenues::FVenue Venue;
+                FString Why;
+                if (!ReadVenue(Dir / File, Venue, Why))
+                {
+                    UE_LOG(LogFDS, Warning, TEXT("FDS: venue data %s unreadable: %s"), *File, *Why);
+                    continue;
+                }
+                if (FDSVenues::FVenue* Listed = GCatalog.FindByPredicate([&Venue](const FDSVenues::FVenue& V) { return V.Id == Venue.Id; }))
+                {
+                    *Listed = MoveTemp(Venue);
+                }
+                else
+                {
+                    GCatalog.Add(MoveTemp(Venue));
+                }
+            }
+        }
+        for (const FDSVenues::FVenue& Venue : GCatalog)
+        {
             TArray<FString> Times;
             Venue.Lighting.GetKeys(Times);
             UE_LOG(LogFDS, Display, TEXT("FDS: venue %s: map %s%s, time of day [%s]"), *Venue.Id, *Venue.Map,
                 FDSInstallContent::SourceOf(Venue.Map) == FDSInstallContent::ESource::Own ? TEXT("") : TEXT(" (no FDS stub world)"), *FString::Join(Times, TEXT(", ")));
-            GCatalog.Add(MoveTemp(Venue));
         }
+    }
+
+    // Whether FDS ships stubs for the streamed sublevels of a venue map (its Sublevels folder, Config/FDSVenueSublevels-*.txt).
+    // Without the install these are the only sublevel packages the server can find.
+    bool HasOwnSublevels(const FString& Map)
+    {
+        FString File;
+        if (!FPackageName::TryConvertLongPackageNameToFilename(Map, File))
+        {
+            return false;
+        }
+        TArray<FString> Files;
+        IFileManager::Get().FindFiles(Files, *(FPaths::GetPath(File) / TEXT("Sublevels/*.umap")), true, false);
+        return Files.Num() > 0;
     }
 
     FString Setting(const TCHAR* Flag, const TCHAR* Env)
@@ -268,7 +309,7 @@ void FDSVenues::Select()
         if (FDSInstallContent::SourceOf(Map) != FDSInstallContent::ESource::Own)
         {
             UE_LOG(LogFDS, Error, TEXT("FDS: venue '%s' -> %s has no FDS stub world (Config/FDSVenueMaps.txt%s); staying on %s"), *Wanted, *Map,
-                GCatalog.Num() == 0 ? TEXT("; venue IDs need the FUSER install's catalogue") : TEXT(""), *GSelected.Map);
+                GCatalog.Num() == 0 ? TEXT("; no venue catalogue, see [/Script/FuserServer.FDSVenues]") : TEXT(""), *GSelected.Map);
         }
         else
         {
@@ -307,9 +348,9 @@ void FDSVenues::Select()
     UE_LOG(LogFDS, Display, TEXT("FDS: session venue %s, world %s, time of day %s%s"), GSelected.Id.IsEmpty() ? TEXT("(not in a catalogue)") : *GSelected.Id,
         *GSelected.Map, GSelected.TimeOfDay.IsEmpty() ? TEXT("(client's own)") : *GSelected.TimeOfDay,
         Lighting ? *FString::Printf(TEXT(" (lighting %s)"), **Lighting) : TEXT(""));
-    // Without the install, only venues whose streamed sublevels FDS stubs itself (Venue01) keep clients connected:
-    // stock UE4.24 closes a connection that reports a visible level the server can't find.
-    if (!FDSInstallContent::IsMounted() && !GSelected.Map.StartsWith(TEXT("/Game/Maps/Venue01/")))
+    // Without the install, only venues whose streamed sublevels FDS stubs itself keep clients connected: stock UE4.24
+    // closes a connection that reports a visible level the server can't find.
+    if (!FDSInstallContent::IsMounted() && !HasOwnSublevels(GSelected.Map))
     {
         UE_LOG(LogFDS, Warning, TEXT("FDS: %s without the FUSER install: FDS has no stubs for its sublevels, clients will be disconnected"), *GSelected.Map);
     }

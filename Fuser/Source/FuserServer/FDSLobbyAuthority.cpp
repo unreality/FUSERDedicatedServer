@@ -1182,7 +1182,7 @@ void UFDSLobbyAuthority::OnPlayerJoined(AHypePlayerState* Player)
 // categories each hold an item; it then records its synced tick / round (PS +0x1040 / +0x1044) and reports
 // _ServerSetHasSyncedStateOfTheWorld. Until then its action consumer ignores other players, and HottestMixPlayback
 // does not clear its decks (FUN_140638680). FUSER's dedicated server kept these snapshots; FDS seeds the master state:
-// the master BPM / key / mode, four decks neither muted nor soloed, stamped
+// the master BPM / key / mode, every track neither muted nor soloed, stamped
 // just after AtMasterTick.
 // The late-join mix: a player joining while a mix plays gets the
 // folded mix (FoldIntoMix) in the categories the sync applies (FUN_140626920): DeckPlayingState (SpawnDisc Play),
@@ -1241,7 +1241,9 @@ void UFDSLobbyAuthority::SeedStateOfTheWorld(AHypePlayerState* Player)
     else
     {
         FMultiplayerActionItemEntry& SoloMute = AddItem(World.DeckSoloMuteStates, EMultiplayerActionType::SoloMuteStates);
-        SoloMute.DeckStates.SetNum(4);
+        // one entry per ETrackType, as a client's own UDeckState holds them: the client copies the array at the length
+        // sent (FUN_140602ab0) and indexes it by track type
+        SoloMute.DeckStates.SetNum(static_cast<int32>(ETrackType::Num));
         World.DeckSoloMuteStates.MarkItemDirty(SoloMute);
     }
     if (bWithMix)
